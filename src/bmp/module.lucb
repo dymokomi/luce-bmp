@@ -67,10 +67,12 @@ pub enum Compression:
 
 ## A bitmap's size and pixel format, from its headers.
 pub struct Info:
+    ## The picture's size in pixels (for an icon's DIB, the colour image's).
     pub var width: usize
     pub var height: usize
     ## Bits a pixel: 1, 2, 4, 8, 16, 24 or 32 (0 for an embedded JPEG or PNG).
     pub var bits: usize
+    ## How the pixels are stored.
     pub var compression: Compression = Compression.rgb
     ## The info header's size: 12 for OS/2 1.x, 40 for BITMAPINFOHEADER, 108 for V4,
     ## 124 for V5, 16 to 64 for OS/2 2.x.
