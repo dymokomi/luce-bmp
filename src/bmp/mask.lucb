@@ -1,0 +1,54 @@
+#==============================================================================================
+#
+#   bmp/mask - Alpha after decoding: opaque when unused, an icon's AND mask
+#
+#   DESCRIPTION:
+#       Many bitmaps with an alpha mask (and 32-bit icons) leave the alpha bytes zero
+#       throughout; those are opaque, not invisible, so an image whose decoded alpha is
+#       zero everywhere is made opaque, as Chrome makes it. An icon's colour image is
+#       followed by its AND mask, one bit a pixel, rows padded to four bytes, in the
+#       colour rows' order; where the image has no alpha of its own (fewer than 16 bits,
+#       no alpha mask, or an alpha of zero throughout), a set bit makes its pixel
+#       transparent. Mask rows the file does not hold leave their pixels opaque.
+#
+#==============================================================================================
+
+# mark: Alpha =================================================================================
+
+## Settle the alpha of the `rows` decoded rows of `canvas`.
+func finish_alpha(data: const u8[], header: const Header*, canvas: u8[], rows: usize):
+    let rle = header.compression == Compression.rle4 or header.compression == Compression.rle8 or header.compression == Compression.rle24
+    if rle:
+        return
+    let width = header.width
+    let first = 0 if header.top_down else header.height - rows
+    let decoded = canvas[first * width * 4..<(first + rows) * width * 4]
+    var seen = false
+    if header.masks[3] != 0:
+        var at: usize = 3
+        while at < decoded.length:
+            if decoded[at] != 0:
+                seen = true
+                break
+            at += 4
+        if not seen:
+            at = 3
+            while at < decoded.length:
+                decoded[at] = 255
+                at += 4
+    if header.icon and (header.depth < 16 or header.masks[3] == 0 or not seen):
+        apply_and_mask(data, header, canvas)
+
+## Make the pixels an icon's AND mask sets transparent.
+func apply_and_mask(data: const u8[], header: const Header*, canvas: u8[]):
+    let width = header.width
+    let stride = (width + 31) // 32 * 4
+    let start = header.pixels + header.stride() * header.height
+    for row in 0..<header.height:
+        if start + (row + 1) * stride > data.length:
+            return
+        let line = data[start + row * stride..]
+        let y = row if header.top_down else header.height - 1 - row
+        for x in 0..<width:
+            if ((line[x // 8] >> (u8)(7 - x % 8)) & 1) != 0:
+                memory.set(canvas[(y * width + x) * 4..<(y * width + x) * 4 + 4], 0)

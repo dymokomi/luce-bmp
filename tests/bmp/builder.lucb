@@ -1,0 +1,134 @@
+#==============================================================================================
+#
+#   tests/bmp/builder - Writing small bitmaps for the tests
+#
+#   DESCRIPTION:
+#       A `Bitmap` writes a BMP file (or a bare DIB) field by field into a fixed buffer:
+#       the file header, an info header of any size, bitfield masks, a palette and rows
+#       padded to four bytes. `start_pixels` records where the pixels begin in the file
+#       header, so tests can also lie about it.
+#
+#==============================================================================================
+
+# mark: The builder ===========================================================================
+
+## A bitmap written into a fixed buffer.
+struct Bitmap:
+    var bytes: u8[65536]
+    var used: usize
+    ## Whether there is a file header, whose pixel offset `start_pixels` fills in.
+    var file: bool
+    ## Where the pixel rows begin, for their padding.
+    var pixel_start: usize
+
+    ## The bitmap so far.
+    func data() -> const u8[]:
+        return self.bytes[..<self.used]
+
+    mutating func add(byte: u8):
+        self.bytes[self.used] = byte
+        self.used += 1
+
+    mutating func add_all(data: const u8[]):
+        for byte in data:
+            self.add(byte)
+
+    mutating func word(value: usize):
+        self.add((u8)(value & 0xFF))
+        self.add((u8)((value >> 8) & 0xFF))
+
+    mutating func long(value: u32):
+        self.word((usize)(value & 0xFFFF))
+        self.word((usize)(value >> 16))
+
+    ## The 14-byte file header; its pixel offset is filled in by `start_pixels`.
+    mutating func file_header():
+        self.file = true
+        self.add_all(b"BM")
+        self.long(0)
+        self.long(0)
+        self.long(0)
+
+    ## An info header of `size` bytes: 12 for OS/2 1.x, else the BITMAPINFOHEADER fields,
+    ## then `masks` from byte 40 on, zeros after.
+    mutating func info(size: usize, width: i32, height: i32, bits: usize, compression: u32 = 0, colors: u32 = 0, masks: u32[4] = [0, 0, 0, 0]):
+        let start = self.used
+        self.long((u32)size)
+        if size == 12:
+            self.word((usize)width)
+            self.word((usize)height)
+            self.word(1)
+            self.word(bits)
+            return
+        self.long((u32)width)
+        self.long((u32)height)
+        self.word(1)
+        self.word(bits)
+        if size > 16:
+            self.long(compression)
+            self.long(0)
+            self.long(2835)
+            self.long(2835)
+            self.long(colors)
+            self.long(0)
+        if size >= 56:
+            for mask in masks:
+                self.long(mask)
+        while self.used < start + size:
+            self.add(0)
+
+    ## `masks` after a 40-byte header: three, or four for BI_ALPHABITFIELDS.
+    mutating func masks(r: u32, g: u32, b: u32, a: u32? = none):
+        self.long(r)
+        self.long(g)
+        self.long(b)
+        if let value = a:
+            self.long(value)
+
+    ## A palette of `colors` (RGB triples), 4 bytes an entry, or 3 for OS/2 1.x.
+    mutating func palette(colors: const u8[], entry: usize = 4):
+        var at: usize = 0
+        while at + 2 < colors.length:
+            self.add(colors[at + 2])
+            self.add(colors[at + 1])
+            self.add(colors[at])
+            if entry == 4:
+                self.add(0)
+            at += 3
+
+    ## The pixels start here; the file header says they start at `offset` when given.
+    mutating func start_pixels(offset: usize? = none):
+        self.pixel_start = self.used
+        if self.file:
+            let at = offset else self.used
+            self.bytes[10] = (u8)(at & 0xFF)
+            self.bytes[11] = (u8)((at >> 8) & 0xFF)
+
+    ## A row of pixel bytes, padded to four.
+    mutating func row(data: const u8[]):
+        self.add_all(data)
+        while (self.used - self.pixel_start) % 4 != 0:
+            self.add(0)
+
+# mark: Helpers ===============================================================================
+
+## The RGBA pixel at `x`, `y` of a `width`-wide picture, as one number 0xRRGGBBAA.
+func rgba_at(canvas: const u8[], width: usize, x: usize, y: usize) -> u32:
+    let at = (y * width + x) * 4
+    return ((u32)canvas[at] << 24) | ((u32)canvas[at + 1] << 16) | ((u32)canvas[at + 2] << 8) | (u32)canvas[at + 3]
+
+## Red, green, blue, white as RGB triples, and as pixels.
+let four_colors = b"\xFF\x00\x00\x00\xFF\x00\x00\x00\xFF\xFF\xFF\xFF"
+let red: u32 = 0xFF0000FF
+let green: u32 = 0x00FF00FF
+let blue: u32 = 0x0000FFFF
+let white: u32 = 0xFFFFFFFF
+let black: u32 = 0x000000FF
+let clear_pixel: u32 = 0
+
+## The code a decode of the file `data` fails with, or none.
+func failure_of(data: const u8[]) -> ErrorCode?:
+    var out: u8[4096]
+    decode_rgba8(data, out) catch failure:
+        return failure.code
+    return none

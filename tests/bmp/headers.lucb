@@ -1,0 +1,113 @@
+#==============================================================================================
+#
+#   tests/bmp/headers - What is refused, what is unsupported, and embedded payloads
+#
+#==============================================================================================
+
+## A 1x1 bitmap with a 40-byte header of `bits` and `compression`, and four pixel bytes.
+func header_only(bitmap: Bitmap*, bits: usize, compression: u32 = 0, width: i32 = 1, height: i32 = 1, size: usize = 40):
+    bitmap.file_header()
+    bitmap.info(size, width, height, bits, compression = compression)
+    bitmap.start_pixels()
+    bitmap.add_all(b"\x00\x00\x00\x00")
+
+test "files that are not BMPs are refused":
+    assert(failure_of(b"GIF89a") == corrupt)
+    assert(failure_of(b"BM\x00\x00") == corrupt)
+    assert(failure_of(b"BA\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00") == unsupported)
+
+test "unknown header sizes and bit depths are refused":
+    var odd = Bitmap()
+    header_only(&odd, 24, size = 66)
+    assert(failure_of(odd.data()) == corrupt)
+    var depth = Bitmap()
+    header_only(&depth, 7)
+    assert(failure_of(depth.data()) == corrupt)
+    var wide = Bitmap()
+    header_only(&wide, 64)
+    assert(failure_of(wide.data()) == unsupported)
+
+test "a bitmap with no width or height is refused":
+    var none_wide = Bitmap()
+    header_only(&none_wide, 24, width = 0)
+    assert(failure_of(none_wide.data()) == corrupt)
+    var negative = Bitmap()
+    header_only(&negative, 24, width = -3)
+    assert(failure_of(negative.data()) == corrupt)
+    var flat = Bitmap()
+    header_only(&flat, 24, height = 0)
+    assert(failure_of(flat.data()) == corrupt)
+
+test "compressions need the depths they allow":
+    var bitfields = Bitmap()
+    header_only(&bitfields, 24, compression = 3)
+    assert(failure_of(bitfields.data()) == corrupt)
+    var rle8 = Bitmap()
+    header_only(&rle8, 24, compression = 1)
+    assert(failure_of(rle8.data()) == corrupt)
+    var unknown = Bitmap()
+    header_only(&unknown, 24, compression = 11)
+    assert(failure_of(unknown.data()) == unsupported)
+
+test "OS/2 Huffman 1D is unsupported":
+    var bitmap = Bitmap()
+    header_only(&bitmap, 1, compression = 3, size = 64)
+    let found = try info(bitmap.data())
+    assert(found.compression == Compression.huffman)
+    assert(failure_of(bitmap.data()) == unsupported)
+
+test "overlapping or gapped masks are refused":
+    var overlap = Bitmap()
+    overlap.file_header()
+    overlap.info(40, 1, 1, 16, compression = 3)
+    overlap.masks(0xF800, 0x0FE0, 0x001F)
+    overlap.start_pixels()
+    overlap.row(b"\x00\x00")
+    assert(failure_of(overlap.data()) == corrupt)
+    var gapped = Bitmap()
+    gapped.file_header()
+    gapped.info(40, 1, 1, 16, compression = 3)
+    gapped.masks(0xF000, 0x0A00, 0x001F)
+    gapped.start_pixels()
+    gapped.row(b"\x00\x00")
+    assert(failure_of(gapped.data()) == corrupt)
+
+test "a channel with an empty mask reads zero":
+    var bitmap = Bitmap()
+    bitmap.file_header()
+    bitmap.info(40, 1, 1, 16, compression = 3)
+    bitmap.masks(0xFF00, 0x00FF, 0)
+    bitmap.start_pixels()
+    bitmap.row(b"\x80\xFF")
+    var out: u8[4]
+    try decode_rgba8(bitmap.data(), out)
+    assert(rgba_at(out, 1, 0, 0) == 0xFF8000FF)
+
+test "an output buffer too small, or a picture over the limit, is refused":
+    var bitmap = Bitmap()
+    rgb24(&bitmap)
+    var small: u8[20]
+    var failed = false
+    decode_rgba8(bitmap.data(), small) catch failure:
+        failed = failure.code == invalid
+    assert(failed)
+    var out: u8[24]
+    failed = false
+    decode_rgba8(bitmap.data(), out, Options(max_pixels = 5)) catch failure:
+        failed = failure.code == limit
+    assert(failed)
+
+test "an embedded PNG is handed back, not decoded":
+    var bitmap = Bitmap()
+    bitmap.file_header()
+    bitmap.info(124, 1, 1, 0, compression = 5)
+    bitmap.start_pixels()
+    bitmap.add_all(b"\x89PNG\r\n\x1a\nrest")
+    let found = try info(bitmap.data())
+    assert(found.compression == Compression.png and found.bits == 0)
+    let payload = embedded(bitmap.data()) else trap("no payload")
+    assert(payload[0] == 0x89 and payload[1] == 'P' and payload.length == 12)
+    assert(failure_of(bitmap.data()) == unsupported)
+    var plain = Bitmap()
+    rgb24(&plain)
+    assert(embedded(plain.data()) == none)

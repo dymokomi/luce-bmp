@@ -1,0 +1,265 @@
+#==============================================================================================
+#
+#   bmp/header - The file header, the info header variants, masks and palette
+#
+#   DESCRIPTION:
+#       `Header.parse` reads what a bitmap says about itself and where its parts are:
+#       the 14-byte file header of a BMP file (its "BM" signature and the offset of the
+#       pixels), then the info header, told apart by its size: 12 bytes for OS/2 1.x
+#       (16-bit sizes, 3-byte palette entries), 40, 52, 56, 108 or 124 for Windows, any
+#       other size from 16 to 64 for OS/2 2.x (whose compression 3 is Huffman 1D and 4
+#       RLE24). It checks each compression against the bit depths it allows, as Chrome
+#       does, and settles the channel masks: those in a 52-byte or larger header, the
+#       12 or 16 bytes after a 40-byte one, or the defaults (5-5-5, 8-8-8).
+#
+#==============================================================================================
+
+# mark: Reading ===============================================================================
+
+## The little-endian 16-bit number at `at` of `data`.
+func word(data: const u8[], at: usize) -> usize:
+    return (usize)data[at] | ((usize)data[at + 1] << 8)
+
+## The little-endian 32-bit number at `at` of `data`.
+func long(data: const u8[], at: usize) -> u32:
+    return (u32)data[at] | ((u32)data[at + 1] << 8) | ((u32)data[at + 2] << 16) | ((u32)data[at + 3] << 24)
+
+## Whether the bytes of `data` at `at` are `text`.
+func holds(data: const u8[], at: usize, text: str) -> bool:
+    if at + text.length > data.length:
+        return false
+    return (str)data[at..<at + text.length] == text
+
+## The lesser of `a` and `b`.
+func least(a: usize, b: usize) -> usize:
+    return a if a < b else b
+
+# mark: The header ============================================================================
+
+## What a bitmap's headers say, and where its palette and pixels are.
+struct Header:
+    var width: usize
+    ## The colour image's rows: for an icon, half the header's height.
+    var height: usize
+    var top_down: bool
+    ## Bits a pixel as the header gives them, and as the pixel data is read (RLE4 and
+    ## RLE8 data are 4 and 8 bits whatever the header says).
+    var bits: usize
+    var depth: usize
+    var compression: Compression = Compression.rgb
+    var header_size: usize
+    ## The red, green, blue and alpha masks of 16- and 32-bit pixels.
+    var masks: u32[4]
+    ## The palette: where it starts, the bytes an entry, the entries.
+    var palette: usize
+    var entry: usize = 4
+    var colors: usize
+    ## Where the pixel data starts, and the size the header gives it (0 when unknown).
+    var pixels: usize
+    var image_size: usize
+    var icon: bool
+
+    ## The headers of the bitmap in `data`: a BMP file when `file`, else a bare DIB;
+    ## `icon` for an ICO or CUR entry's DIB.
+    static func parse(data: const u8[], file: bool, icon: bool) -> Header!:
+        var at: usize = 0
+        var offset: usize = 0
+        if file:
+            if holds(data, 0, "BA") or holds(data, 0, "CI") or holds(data, 0, "CP") or holds(data, 0, "IC") or holds(data, 0, "PT"):
+                error(unsupported, "an OS/2 bitmap array or icon, not a BMP")
+            if not holds(data, 0, "BM"):
+                error(corrupt, "not a BMP: no BM signature")
+            if data.length < 18:
+                error(corrupt, "BMP ends inside its file header")
+            offset = (usize)long(data, 10)
+            at = 14
+        if at + 4 > data.length:
+            error(corrupt, "BMP ends before its info header")
+        var header = Header(icon = icon)
+        let size = (usize)long(data, at)
+        let windows = size == 40 or size == 52 or size == 56 or size == 108 or size == 124
+        let os2 = size == 12 or (not windows and size >= 16 and size <= 64)
+        if not windows and not os2:
+            error(corrupt, "BMP info header has an unknown size")
+        if at + size > data.length:
+            error(corrupt, "BMP ends inside its info header")
+        header.header_size = size
+        var clr_used: usize = 0
+        var height: i64 = 0
+        if size == 12:
+            header.width = word(data, at + 4)
+            height = (i64)word(data, at + 6)
+            header.bits = word(data, at + 10)
+            header.entry = 3
+        else:
+            let width = (i32)long(data, at + 4)
+            header.width = (usize)width if width > 0 else 0
+            height = (i64)(i32)long(data, at + 8)
+            header.bits = word(data, at + 14)
+            if size >= 20:
+                try header.compress(long(data, at + 16), os2)
+            if size >= 24:
+                header.image_size = (usize)long(data, at + 20)
+            if size >= 36:
+                clr_used = (usize)long(data, at + 32)
+            if windows and size >= 52:
+                for channel: usize in 0..<3:
+                    header.masks[channel] = long(data, at + 40 + channel * 4)
+            if windows and size >= 56:
+                header.masks[3] = long(data, at + 52)
+        header.top_down = height < 0
+        let rows = -height if height < 0 else height
+        if header.width == 0 or rows == 0:
+            error(corrupt, "BMP has no width or no height")
+        if header.top_down and os2:
+            error(corrupt, "OS/2 bitmaps cannot be top-down")
+        header.height = (usize)rows // 2 if icon else (usize)rows
+        if header.height == 0:
+            error(corrupt, "icon bitmap has no rows")
+        try header.check_depth(os2)
+        var start = at + size
+        if not windows or size >= 52 or (header.compression != Compression.bitfields and header.compression != Compression.alpha_bitfields):
+            header.default_masks(size)
+        else:
+            let count: usize = 16 if header.compression == Compression.alpha_bitfields else 12
+            if start + count > data.length or (offset != 0 and offset < start + count):
+                error(corrupt, "BMP ends inside its bitfield masks")
+            for channel in 0..<count // 4:
+                header.masks[channel] = long(data, start + channel * 4)
+            start += count
+        try header.check_masks()
+        header.place_palette(data, start, offset, clr_used, file)
+        return header
+
+    ## Read the compression `value` (OS/2 2.x numbers 3 and 4 differently).
+    mutating func compress(value: u32, os2: bool) -> !:
+        self.compression = match value:
+            0 => Compression.rgb
+            1 => Compression.rle8
+            2 => Compression.rle4
+            3 => Compression.huffman if os2 else Compression.bitfields
+            4 => Compression.rle24 if os2 else Compression.jpeg
+            5 => Compression.png
+            6 => Compression.alpha_bitfields
+            _ => error(unsupported, "BMP uses an unknown compression")
+        if os2 and value > 4:
+            error(unsupported, "OS/2 bitmap uses an unknown compression")
+
+    ## Check the bit depth against the header and the compression, as Chrome does.
+    mutating func check_depth(os2: bool) -> !:
+        let bits = self.bits
+        if bits == 64:
+            error(unsupported, "BMP has 64-bit pixels")
+        let common = bits == 1 or bits == 4 or bits == 8 or bits == 24
+        if not common and (os2 or not (bits == 0 or bits == 2 or bits == 16 or bits == 32)):
+            error(corrupt, "BMP has an invalid bit depth")
+        self.depth = bits
+        match self.compression:
+            .rgb:
+                if bits == 0:
+                    error(corrupt, "BMP has no bits a pixel")
+            .rle8:
+                if bits == 0 or bits > 8:
+                    error(corrupt, "RLE8 needs 8 bits a pixel or fewer")
+                self.depth = 8
+            .rle4:
+                if bits == 0 or bits > 4:
+                    error(corrupt, "RLE4 needs 4 bits a pixel or fewer")
+                self.depth = 4
+            .bitfields, .alpha_bitfields:
+                if bits != 16 and bits != 32:
+                    error(corrupt, "bitfields need 16 or 32 bits a pixel")
+            .jpeg, .png:
+                return
+            .huffman:
+                if bits != 1:
+                    error(corrupt, "Huffman 1D needs 1 bit a pixel")
+            .rle24:
+                if bits != 24:
+                    error(corrupt, "RLE24 needs 24 bits a pixel")
+        if self.top_down and not (self.compression == Compression.rgb or self.compression == Compression.bitfields or self.compression == Compression.alpha_bitfields):
+            error(corrupt, "compressed bitmaps cannot be top-down")
+
+    ## The masks of a bitmap without bitfields: 5-5-5 for 16 bits, 8-8-8 for 32. The
+    ## alpha mask a 56-byte or larger header gives stays; a 32-bit icon without one has
+    ## its fourth byte as alpha.
+    mutating func default_masks(size: usize):
+        if self.compression == Compression.bitfields or self.compression == Compression.alpha_bitfields:
+            return
+        if self.depth == 16:
+            self.masks[0] = 0x7C00
+            self.masks[1] = 0x03E0
+            self.masks[2] = 0x001F
+            self.masks[3] = 0
+        elif self.depth == 32:
+            self.masks[0] = 0xFF0000
+            self.masks[1] = 0xFF00
+            self.masks[2] = 0xFF
+            if size < 56:
+                self.masks[3] = 0xFF000000 if self.icon else 0
+
+    ## Trim the masks to the pixel's bits; fail on masks that overlap or have gaps.
+    mutating func check_masks() -> !:
+        if (self.depth != 16 and self.depth != 32) or self.compression == Compression.jpeg or self.compression == Compression.png:
+            var none_set: u32[4]
+            self.masks = none_set
+            return
+        for channel: usize in 0..<4:
+            if self.depth == 16:
+                self.masks[channel] &= 0xFFFF
+            let mask = self.masks[channel]
+            for other in 0..<channel:
+                if (mask & self.masks[other]) != 0:
+                    error(corrupt, "BMP bitfield masks overlap")
+            if mask != 0:
+                let low = mask >> (u32)trailing_zeros(mask)
+                if (low & (low +% 1)) != 0:
+                    error(corrupt, "BMP bitfield mask is not contiguous")
+
+    ## Settle the palette, which starts at `start`, and the pixel data: at `offset` in a
+    ## file, right after the palette in a DIB. A file whose pixels start inside its
+    ## palette has the palette cut there, and one whose gap holds exactly three bytes a
+    ## colour has 3-byte entries (some OS/2 2.x writers); an offset of 0, one inside the
+    ## headers, or one that leaves a paletted bitmap no palette at all is taken to mean
+    ## right after the palette.
+    mutating func place_palette(data: const u8[], start: usize, offset: usize, clr_used: usize, file: bool):
+        self.palette = start
+        var declared: usize = 0
+        if self.depth > 0 and self.depth <= 8:
+            let most = (usize)1 << self.depth
+            declared = most if self.header_size == 12 or clr_used == 0 or clr_used > most else clr_used
+        var room = (data.length - least(start, data.length)) // self.entry
+        self.pixels = start + declared * self.entry
+        if file and (offset > start or (offset == start and declared == 0)):
+            let gap = offset - start
+            if self.entry == 4 and declared > 0 and gap == declared * 3:
+                self.entry = 3
+            room = least(room, gap // self.entry)
+            self.pixels = offset
+        self.colors = least(declared, room)
+
+    ## The bytes a row of pixels takes, padded to four.
+    func stride() -> usize:
+        return (self.width * self.depth + 31) // 32 * 4
+
+    ## The embedded JPEG or PNG: the pixel data, as long as the header says.
+    func payload(data: const u8[]) -> const u8[]:
+        let start = least(self.pixels, data.length)
+        if self.image_size > 0 and self.image_size <= data.length - start:
+            return data[start..<start + self.image_size]
+        return data[start..]
+
+    ## The public description.
+    func info() -> Info:
+        let rle = self.compression == Compression.rle4 or self.compression == Compression.rle8 or self.compression == Compression.rle24
+        return Info(width = self.width, height = self.height, bits = self.bits, compression = self.compression, header_size = self.header_size,
+                    top_down = self.top_down, colors = self.colors, alpha = self.masks[3] != 0 or rle or self.icon)
+
+## The number of zero bits below the lowest set bit of `mask`, which is not zero.
+func trailing_zeros(mask: u32) -> usize:
+    var count: usize = 0
+    var rest = mask
+    while (rest & 1) == 0:
+        rest >>= 1
+        count += 1
+    return count

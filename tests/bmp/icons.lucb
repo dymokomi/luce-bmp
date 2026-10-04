@@ -1,0 +1,79 @@
+#==============================================================================================
+#
+#   tests/bmp/icons - Bare DIBs, and the DIBs of icons with their AND masks
+#
+#==============================================================================================
+
+## A 2x2 icon DIB of `bits` (8 or 32): colours red, green over blue, white, then the AND
+## mask `mask` (one byte a row, bottom row first) unless it is empty.
+func icon_dib(bitmap: Bitmap*, bits: usize, mask: const u8[], alpha: u8 = 0):
+    bitmap.info(40, 2, 4, bits)
+    if bits == 8:
+        bitmap.palette(four_colors)
+        var index: usize = 4
+        while index < 256:
+            bitmap.palette(b"\x00\x00\x00")
+            index += 1
+    bitmap.start_pixels()
+    if bits == 8:
+        bitmap.row(b"\x02\x03")
+        bitmap.row(b"\x00\x01")
+    else:
+        var bottom: u8[8] = [0xFF, 0x00, 0x00, 0, 0xFF, 0xFF, 0xFF, 0]
+        var top: u8[8] = [0x00, 0x00, 0xFF, 0, 0x00, 0xFF, 0x00, 0]
+        bottom[3] = alpha
+        top[7] = alpha
+        bitmap.row(bottom)
+        bitmap.row(top)
+    for byte in mask:
+        var row: u8[1]
+        row[0] = byte
+        bitmap.row(row)
+
+test "a bare DIB decodes without a file header":
+    var bitmap = Bitmap()
+    bitmap.info(40, 1, 1, 24)
+    bitmap.start_pixels()
+    bitmap.row(b"\x00\xFF\x00")
+    let found = try info_dib(bitmap.data())
+    assert(found.width == 1 and found.height == 1)
+    var out: u8[4]
+    try decode_dib_rgba8(bitmap.data(), out)
+    assert(rgba_at(out, 1, 0, 0) == green)
+
+test "an icon's DIB counts its mask in the height, and the mask makes pixels clear":
+    var bitmap = Bitmap()
+    # Mask rows, bottom first: the bottom-left and top-right pixels are clear.
+    icon_dib(&bitmap, 8, b"\x80\x40")
+    let found = try info_dib(bitmap.data(), Options(icon = true))
+    assert(found.width == 2 and found.height == 2 and found.alpha)
+    var out: u8[16]
+    try decode_dib_rgba8(bitmap.data(), out, Options(icon = true))
+    assert(rgba_at(out, 2, 0, 0) == red and rgba_at(out, 2, 1, 0) == clear_pixel)
+    assert(rgba_at(out, 2, 0, 1) == clear_pixel and rgba_at(out, 2, 1, 1) == white)
+
+test "a 32-bit icon with alpha ignores its mask; one without alpha uses it":
+    var with_alpha = Bitmap()
+    icon_dib(&with_alpha, 32, b"\xC0\xC0", alpha = 0x80)
+    var out: u8[16]
+    try decode_dib_rgba8(with_alpha.data(), out, Options(icon = true))
+    assert(rgba_at(out, 2, 0, 0) == 0xFF000000 and rgba_at(out, 2, 1, 0) == 0x00FF0080)
+    assert(rgba_at(out, 2, 0, 1) == 0x0000FF80 and rgba_at(out, 2, 1, 1) == 0xFFFFFF00)
+    var without = Bitmap()
+    icon_dib(&without, 32, b"\x80\x00")
+    try decode_dib_rgba8(without.data(), out, Options(icon = true))
+    assert(rgba_at(out, 2, 0, 0) == red and rgba_at(out, 2, 1, 0) == green)
+    assert(rgba_at(out, 2, 0, 1) == clear_pixel and rgba_at(out, 2, 1, 1) == white)
+
+test "an icon whose mask is missing is opaque":
+    var bitmap = Bitmap()
+    icon_dib(&bitmap, 8, b"")
+    var out: u8[16]
+    try decode_dib_rgba8(bitmap.data(), out, Options(icon = true))
+    assert(rgba_at(out, 2, 0, 0) == red and rgba_at(out, 2, 1, 1) == white)
+
+test "the same DIB read as a plain bitmap is twice as tall":
+    var bitmap = Bitmap()
+    icon_dib(&bitmap, 8, b"\x80\x40")
+    let found = try info_dib(bitmap.data())
+    assert(found.height == 4 and not found.alpha)

@@ -1,0 +1,83 @@
+#==============================================================================================
+#
+#   tests/bmp/rle - RLE8, RLE4 and RLE24
+#
+#==============================================================================================
+
+## A `width` x `height` bitmap compressed `compression` with the four-colour palette, its
+## run-length data `runs`.
+func rle_bitmap(bitmap: Bitmap*, compression: u32, width: i32, height: i32, runs: const u8[]):
+    bitmap.file_header()
+    let bits: usize = 8 if compression == 1 else (4 if compression == 2 else 24)
+    if compression == 4:
+        bitmap.info(64, width, height, bits, compression = compression)
+    else:
+        bitmap.info(40, width, height, bits, compression = compression, colors = 4)
+        bitmap.palette(four_colors)
+    bitmap.start_pixels()
+    bitmap.add_all(runs)
+
+test "RLE8 runs, literal runs, row ends and the bitmap's end":
+    var bitmap = Bitmap()
+    # Bottom row: 2 x green, then the literals blue, white, red (padded); top row: 4 x red.
+    rle_bitmap(&bitmap, 1, 5, 2, b"\x02\x01\x00\x03\x02\x03\x00\x00\x00\x00\x04\x00\x00\x01")
+    let found = try info(bitmap.data())
+    assert(found.compression == Compression.rle8 and found.alpha)
+    var out: u8[40]
+    try decode_rgba8(bitmap.data(), out)
+    assert(rgba_at(out, 5, 0, 1) == green and rgba_at(out, 5, 1, 1) == green)
+    assert(rgba_at(out, 5, 2, 1) == blue and rgba_at(out, 5, 3, 1) == white and rgba_at(out, 5, 4, 1) == red)
+    for x: usize in 0..<4:
+        assert(rgba_at(out, 5, x, 0) == red)
+    assert(rgba_at(out, 5, 4, 0) == clear_pixel)
+
+test "a delta skips pixels, which stay transparent":
+    var bitmap = Bitmap()
+    # One green, move 2 right and 1 up, one blue, end.
+    rle_bitmap(&bitmap, 1, 4, 2, b"\x01\x01\x00\x02\x02\x01\x01\x02\x00\x01")
+    var out: u8[32]
+    try decode_rgba8(bitmap.data(), out)
+    assert(rgba_at(out, 4, 0, 1) == green and rgba_at(out, 4, 1, 1) == clear_pixel)
+    assert(rgba_at(out, 4, 3, 0) == blue and rgba_at(out, 4, 0, 0) == clear_pixel)
+
+test "a run past the end of its row is cut off there":
+    var bitmap = Bitmap()
+    rle_bitmap(&bitmap, 1, 2, 2, b"\x09\x02\x00\x00\x01\x03\x00\x01")
+    var out: u8[16]
+    try decode_rgba8(bitmap.data(), out)
+    assert(rgba_at(out, 2, 0, 1) == blue and rgba_at(out, 2, 1, 1) == blue)
+    assert(rgba_at(out, 2, 0, 0) == white and rgba_at(out, 2, 1, 0) == clear_pixel)
+
+test "RLE4 alternates the two nibbles":
+    var bitmap = Bitmap()
+    # 5 pixels of 1, 2 alternating; then the literals 3, 0, 1 (two bytes, padded).
+    rle_bitmap(&bitmap, 2, 8, 1, b"\x05\x12\x00\x03\x30\x10\x00\x01")
+    let found = try info(bitmap.data())
+    assert(found.bits == 4 and found.compression == Compression.rle4)
+    var out: u8[32]
+    try decode_rgba8(bitmap.data(), out)
+    assert(rgba_at(out, 8, 0, 0) == green and rgba_at(out, 8, 1, 0) == blue and rgba_at(out, 8, 4, 0) == green)
+    assert(rgba_at(out, 8, 5, 0) == white and rgba_at(out, 8, 6, 0) == red and rgba_at(out, 8, 7, 0) == green)
+
+test "OS/2 RLE24 repeats and copies BGR pixels":
+    var bitmap = Bitmap()
+    # Two red, then the literals blue, green, white (nine bytes, padded).
+    rle_bitmap(&bitmap, 4, 5, 1, b"\x02\x00\x00\xFF\x00\x03\xFF\x00\x00\x00\xFF\x00\xFF\xFF\xFF\x00\x00\x01")
+    let found = try info(bitmap.data())
+    assert(found.compression == Compression.rle24 and found.header_size == 64)
+    var out: u8[20]
+    try decode_rgba8(bitmap.data(), out)
+    assert(rgba_at(out, 5, 0, 0) == red and rgba_at(out, 5, 1, 0) == red)
+    assert(rgba_at(out, 5, 2, 0) == blue and rgba_at(out, 5, 3, 0) == green and rgba_at(out, 5, 4, 0) == white)
+
+test "run-length data cut short keeps what it set":
+    var bitmap = Bitmap()
+    rle_bitmap(&bitmap, 1, 2, 1, b"\x01\x01\x00\x05\x01")
+    var out: u8[8]
+    try decode_rgba8(bitmap.data(), out)
+    assert(rgba_at(out, 2, 0, 0) == green and rgba_at(out, 2, 1, 0) == clear_pixel)
+
+test "a top-down RLE bitmap is refused":
+    var bitmap = Bitmap()
+    rle_bitmap(&bitmap, 1, 2, -1, b"\x02\x01\x00\x01")
+    assert(failure_of(bitmap.data()) == corrupt)

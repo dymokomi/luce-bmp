@@ -1,0 +1,102 @@
+#==============================================================================================
+#
+#   bmp/pixels - Uncompressed rows: palettes, bitfields and BGR
+#
+#   DESCRIPTION:
+#       Rows are padded to four bytes and run bottom to top unless the height is
+#       negative. 1, 2, 4 and 8-bit pixels are palette indices, most significant bits
+#       first; an index past the palette is opaque black. 24-bit pixels are blue, green,
+#       red. 16- and 32-bit pixels are little-endian words cut into channels by masks:
+#       a channel of fewer than 8 bits scales to the full range, rounding (5-bit 31 is
+#       255), and a wider one keeps its top 8 bits, as Chrome does. Without an alpha
+#       mask a pixel is opaque. A file that ends early decodes the rows it holds.
+#
+#==============================================================================================
+
+# mark: Channels ==============================================================================
+
+## Where a channel is in a 16- or 32-bit pixel.
+struct Channel:
+    var mask: u32
+    var shift: u32
+    var bits: u32
+
+    ## The channel `mask` selects.
+    static func of(mask: u32) -> Channel:
+        if mask == 0:
+            return Channel(mask = 0, shift = 0, bits = 0)
+        let shift = (u32)trailing_zeros(mask)
+        var bits: u32 = 0
+        var rest = mask >> shift
+        while rest != 0:
+            bits += 1
+            rest >>= 1
+        return Channel(mask = mask, shift = shift, bits = bits)
+
+    ## The channel's value in `pixel`, scaled to 8 bits; 0 for a channel with no bits.
+    func value(pixel: u32) -> u8:
+        if self.bits == 0:
+            return 0
+        let raw = (pixel & self.mask) >> self.shift
+        if self.bits >= 8:
+            return (u8)(raw >> (self.bits - 8))
+        let most = ((u32)1 << self.bits) - 1
+        return (u8)((raw * 255 + most // 2) // most)
+
+# mark: Palettes ==============================================================================
+
+## The palette as RGBA, 256 entries; those past the bitmap's palette are opaque black.
+func palette_table(data: const u8[], header: const Header*, table: u8[]):
+    for index in 0..<256:
+        table[index * 4 + 3] = 255
+    for index in 0..<header.colors:
+        let at = header.palette + index * header.entry
+        table[index * 4] = data[at + 2]
+        table[index * 4 + 1] = data[at + 1]
+        table[index * 4 + 2] = data[at]
+
+# mark: Rows ==================================================================================
+
+## Decode the uncompressed rows of `data` into `canvas`; answer how many rows were
+## there to decode (a last row cut short counts, decoded as far as it goes).
+func decode_rows(data: const u8[], header: const Header*, canvas: u8[]) -> usize:
+    var table: u8[1024]
+    palette_table(data, header, table)
+    let channels: Channel[4] = [Channel.of(header.masks[0]), Channel.of(header.masks[1]), Channel.of(header.masks[2]), Channel.of(header.masks[3])]
+    let stride = header.stride()
+    let width = header.width
+    let depth = header.depth
+    for row in 0..<header.height:
+        if header.pixels >= data.length or row > (data.length - header.pixels - 1) // stride:
+            return row
+        let start = header.pixels + row * stride
+        let line = data[start..<least(start + stride, data.length)]
+        let y = row if header.top_down else header.height - 1 - row
+        var out = canvas[y * width * 4..<(y + 1) * width * 4]
+        let count = least(width, line.length * 8 // depth)
+        if depth <= 8:
+            let per_byte = 8 // depth
+            let low = ((usize)1 << depth) - 1
+            for x in 0..<count:
+                let shift = (per_byte - 1 - x % per_byte) * depth
+                let index = ((usize)line[x // per_byte] >> shift) & low
+                memory.copy(out[x * 4..], table[index * 4..], 4)
+        elif depth == 24:
+            for x in 0..<count:
+                out[x * 4] = line[x * 3 + 2]
+                out[x * 4 + 1] = line[x * 3 + 1]
+                out[x * 4 + 2] = line[x * 3]
+                out[x * 4 + 3] = 255
+        else:
+            let size = depth // 8
+            for x in 0..<count:
+                var pixel = (u32)line[x * size] | ((u32)line[x * size + 1] << 8)
+                if size == 4:
+                    pixel |= ((u32)line[x * size + 2] << 16) | ((u32)line[x * size + 3] << 24)
+                out[x * 4] = channels[0].value(pixel)
+                out[x * 4 + 1] = channels[1].value(pixel)
+                out[x * 4 + 2] = channels[2].value(pixel)
+                out[x * 4 + 3] = channels[3].value(pixel) if channels[3].bits > 0 else 255
+        if line.length < stride:
+            return row + 1
+    return header.height

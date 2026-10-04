@@ -1,0 +1,222 @@
+#==============================================================================================
+#
+#   tests/bmp/pixels - Uncompressed bitmaps: depths, palettes, bitfields, row order
+#
+#==============================================================================================
+
+## A 3x2 24-bit bitmap: red, green, blue over white, black, red, rows bottom-up unless
+## `top_down`.
+func rgb24(bitmap: Bitmap*, top_down: bool = false):
+    bitmap.file_header()
+    bitmap.info(40, 3, -2 if top_down else 2, 24)
+    bitmap.start_pixels()
+    let top = b"\x00\x00\xFF\x00\xFF\x00\xFF\x00\x00"
+    let bottom = b"\xFF\xFF\xFF\x00\x00\x00\x00\x00\xFF"
+    bitmap.row(top if top_down else bottom)
+    bitmap.row(bottom if top_down else top)
+
+test "a 24-bit bitmap reads bottom-up, BGR, rows padded":
+    var bitmap = Bitmap()
+    rgb24(&bitmap)
+    let found = try info(bitmap.data())
+    assert(found.width == 3 and found.height == 2 and found.bits == 24 and found.header_size == 40)
+    assert(found.compression == Compression.rgb and not found.top_down and not found.alpha)
+    var out: u8[24]
+    try decode_rgba8(bitmap.data(), out)
+    assert(rgba_at(out, 3, 0, 0) == red and rgba_at(out, 3, 1, 0) == green and rgba_at(out, 3, 2, 0) == blue)
+    assert(rgba_at(out, 3, 0, 1) == white and rgba_at(out, 3, 1, 1) == black and rgba_at(out, 3, 2, 1) == red)
+
+test "a negative height reads top-down":
+    var bitmap = Bitmap()
+    rgb24(&bitmap, top_down = true)
+    let found = try info(bitmap.data())
+    assert(found.top_down and found.height == 2)
+    var out: u8[24]
+    try decode_rgba8(bitmap.data(), out)
+    assert(rgba_at(out, 3, 0, 0) == red and rgba_at(out, 3, 2, 1) == red and rgba_at(out, 3, 0, 1) == white)
+
+test "1, 2, 4 and 8-bit indices read most significant bits first":
+    let depths: usize[4] = [1, 2, 4, 8]
+    let rows: u8[4] = [0x40, 0x1B, 0x01, 0x00]
+    for (n, depth) in depths.indexed():
+        var bitmap = Bitmap()
+        bitmap.file_header()
+        bitmap.info(40, 4 if depth > 1 else 2, 1, depth)
+        bitmap.palette(four_colors[..<(6 if depth == 1 else 12)])
+        let count = (usize)1 << depth
+        var index: usize = 4
+        while index < count:
+            bitmap.palette(b"\x00\x00\x00")
+            index += 1
+        bitmap.start_pixels()
+        if depth == 8:
+            bitmap.row(b"\x00\x01\x02\x03")
+        elif depth == 4:
+            bitmap.row(b"\x01\x23")
+        else:
+            var one: u8[1]
+            one[0] = rows[n]
+            bitmap.row(one)
+        var out: u8[16]
+        try decode_rgba8(bitmap.data(), out)
+        assert(rgba_at(out, 4, 0, 0) == red and rgba_at(out, 4, 1, 0) == green)
+        if depth > 1:
+            assert(rgba_at(out, 4, 2, 0) == blue and rgba_at(out, 4, 3, 0) == white)
+
+test "the palette is as long as biClrUsed says, and an index past it is black":
+    var bitmap = Bitmap()
+    bitmap.file_header()
+    bitmap.info(40, 3, 1, 8, colors = 2)
+    bitmap.palette(four_colors[..<6])
+    bitmap.start_pixels()
+    bitmap.row(b"\x01\x00\x02")
+    let found = try info(bitmap.data())
+    assert(found.colors == 2)
+    var out: u8[12]
+    try decode_rgba8(bitmap.data(), out)
+    assert(rgba_at(out, 3, 0, 0) == green and rgba_at(out, 3, 1, 0) == red and rgba_at(out, 3, 2, 0) == black)
+
+test "16-bit pixels default to 5-5-5 and scale to the full range":
+    var bitmap = Bitmap()
+    bitmap.file_header()
+    bitmap.info(40, 3, 1, 16)
+    bitmap.start_pixels()
+    # 0x7FFF white, 0x0421 = 1 in each channel, 0x8000 the unused bit alone.
+    bitmap.row(b"\xFF\x7F\x21\x04\x00\x80")
+    var out: u8[12]
+    try decode_rgba8(bitmap.data(), out)
+    assert(rgba_at(out, 3, 0, 0) == white and rgba_at(out, 3, 1, 0) == 0x080808FF and rgba_at(out, 3, 2, 0) == black)
+
+test "bitfields cut 16 and 32-bit pixels by their masks":
+    var bitmap = Bitmap()
+    bitmap.file_header()
+    bitmap.info(40, 2, 1, 16, compression = 3)
+    bitmap.masks(0xF800, 0x07E0, 0x001F)
+    bitmap.start_pixels()
+    bitmap.row(b"\x00\xF8\xE0\x07")
+    var out: u8[8]
+    try decode_rgba8(bitmap.data(), out)
+    assert(rgba_at(out, 2, 0, 0) == red and rgba_at(out, 2, 1, 0) == green)
+    var wide = Bitmap()
+    wide.file_header()
+    wide.info(40, 2, 1, 32, compression = 3)
+    wide.masks(0x000003FF, 0x000FFC00, 0x3FF00000)
+    wide.start_pixels()
+    # 10 bits each: red 0x3FF, then blue 0x200 (its top 8 bits are 0x80).
+    wide.row(b"\xFF\x03\x00\x00\x00\x00\x00\x20")
+    try decode_rgba8(wide.data(), out)
+    assert(rgba_at(out, 2, 0, 0) == red and rgba_at(out, 2, 1, 0) == 0x000080FF)
+
+test "a 32-bit BI_RGB bitmap is opaque whatever its fourth byte":
+    var bitmap = Bitmap()
+    bitmap.file_header()
+    bitmap.info(40, 2, 1, 32)
+    bitmap.start_pixels()
+    bitmap.row(b"\x00\x00\xFF\x00\x00\xFF\x00\x7F")
+    let found = try info(bitmap.data())
+    assert(not found.alpha)
+    var out: u8[8]
+    try decode_rgba8(bitmap.data(), out)
+    assert(rgba_at(out, 2, 0, 0) == red and rgba_at(out, 2, 1, 0) == green)
+
+test "a V5 alpha mask gives alpha, unless every alpha is zero":
+    let masks: u32[4] = [0x00FF0000, 0x0000FF00, 0x000000FF, 0xFF000000]
+    var bitmap = Bitmap()
+    bitmap.file_header()
+    bitmap.info(124, 2, 1, 32, compression = 3, masks = masks)
+    bitmap.start_pixels()
+    bitmap.row(b"\x00\x00\xFF\x80\x00\xFF\x00\x00")
+    let found = try info(bitmap.data())
+    assert(found.alpha and found.header_size == 124)
+    var out: u8[8]
+    try decode_rgba8(bitmap.data(), out)
+    assert(rgba_at(out, 2, 0, 0) == 0xFF000080 and rgba_at(out, 2, 1, 0) == 0x00FF0000)
+    var opaque = Bitmap()
+    opaque.file_header()
+    opaque.info(108, 2, 1, 32, masks = masks)
+    opaque.start_pixels()
+    opaque.row(b"\x00\x00\xFF\x00\x00\xFF\x00\x00")
+    try decode_rgba8(opaque.data(), out)
+    assert(rgba_at(out, 2, 0, 0) == red and rgba_at(out, 2, 1, 0) == green)
+
+test "BI_ALPHABITFIELDS reads four masks after the header":
+    var bitmap = Bitmap()
+    bitmap.file_header()
+    bitmap.info(40, 1, 1, 32, compression = 6)
+    bitmap.masks(0x000000FF, 0x0000FF00, 0x00FF0000, a = 0xFF000000)
+    bitmap.start_pixels()
+    bitmap.row(b"\x10\x20\x30\x40")
+    var out: u8[4]
+    try decode_rgba8(bitmap.data(), out)
+    assert(rgba_at(out, 1, 0, 0) == 0x10203040)
+
+test "OS/2 1.x headers have 16-bit sizes and 3-byte palette entries":
+    var bitmap = Bitmap()
+    bitmap.file_header()
+    bitmap.info(12, 2, 1, 1)
+    bitmap.palette(four_colors[..<6], entry = 3)
+    bitmap.start_pixels()
+    bitmap.row(b"\x40")
+    let found = try info(bitmap.data())
+    assert(found.header_size == 12 and found.colors == 2)
+    var out: u8[8]
+    try decode_rgba8(bitmap.data(), out)
+    assert(rgba_at(out, 2, 0, 0) == red and rgba_at(out, 2, 1, 0) == green)
+
+test "OS/2 2.x headers may stop after 16 bytes":
+    var bitmap = Bitmap()
+    bitmap.file_header()
+    bitmap.info(16, 2, 1, 8)
+    bitmap.palette(four_colors)
+    bitmap.start_pixels()
+    bitmap.row(b"\x02\x03")
+    let found = try info(bitmap.data())
+    assert(found.header_size == 16)
+    var out: u8[8]
+    try decode_rgba8(bitmap.data(), out)
+    assert(rgba_at(out, 2, 0, 0) == blue and rgba_at(out, 2, 1, 0) == white)
+
+test "the file header's offset places the pixels, or the palette's end when it is bogus":
+    var gap = Bitmap()
+    gap.file_header()
+    gap.info(40, 1, 1, 8, colors = 2)
+    gap.palette(four_colors[..<6])
+    gap.add_all(b"\x01\x01\x01\x01")
+    gap.start_pixels()
+    gap.row(b"\x01")
+    var out: u8[4]
+    try decode_rgba8(gap.data(), out)
+    assert(rgba_at(out, 1, 0, 0) == green)
+    var bogus = Bitmap()
+    bogus.file_header()
+    bogus.info(40, 1, 1, 8, colors = 2)
+    bogus.start_pixels(offset = 54)
+    bogus.palette(four_colors[..<6])
+    bogus.pixel_start = bogus.used
+    bogus.row(b"\x01")
+    try decode_rgba8(bogus.data(), out)
+    assert(rgba_at(out, 1, 0, 0) == green)
+
+test "an OS/2 2.x gap of three bytes a colour holds 3-byte entries":
+    var bitmap = Bitmap()
+    bitmap.file_header()
+    bitmap.info(64, 2, 1, 1)
+    bitmap.palette(four_colors[..<6], entry = 3)
+    bitmap.start_pixels()
+    bitmap.row(b"\x40")
+    var out: u8[8]
+    try decode_rgba8(bitmap.data(), out)
+    assert(rgba_at(out, 2, 0, 0) == red and rgba_at(out, 2, 1, 0) == green)
+
+test "a file cut short decodes the rows it holds":
+    var bitmap = Bitmap()
+    bitmap.file_header()
+    bitmap.info(40, 2, 3, 24)
+    bitmap.start_pixels()
+    bitmap.row(b"\x00\x00\xFF\x00\x00\xFF")
+    bitmap.row(b"\x00\xFF\x00\x00\xFF\x00")
+    bitmap.row(b"\xFF\x00\x00\xFF\x00\x00")
+    var out: u8[24]
+    try decode_rgba8(bitmap.data()[..<bitmap.used - 9], out)
+    assert(rgba_at(out, 2, 0, 2) == red and rgba_at(out, 2, 0, 1) == green)
+    assert(rgba_at(out, 2, 0, 0) == clear_pixel and rgba_at(out, 2, 1, 0) == clear_pixel)

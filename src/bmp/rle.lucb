@@ -1,0 +1,95 @@
+#==============================================================================================
+#
+#   bmp/rle - RLE8, RLE4 and RLE24
+#
+#   DESCRIPTION:
+#       Run-length data is a stream of byte pairs, bottom row first. A pair with a
+#       non-zero count repeats a pixel (RLE4 alternates the two nibbles of its byte;
+#       RLE24 follows the count with a 3-byte BGR pixel). A zero count escapes: 0 ends
+#       the row, 1 ends the bitmap, 2 moves right and up by the next two bytes, and 3 or
+#       more is that many literal pixels, padded to an even number of bytes. Pixels the
+#       stream never sets stay transparent, and runs past the end of a row are cut off
+#       there, as Chrome does; the stream ending early ends the decoding.
+#
+#==============================================================================================
+
+# mark: Run lengths ===========================================================================
+
+## Writes run-length pixels onto the canvas, clipped to it.
+struct Runs:
+    var canvas: u8[]
+    var width: usize
+    var height: usize
+    var table: u8[1024]
+    ## The next pixel: its column, and its row counted from the bottom.
+    var x: usize
+    var row: usize
+
+    ## Set the next pixel to palette entry `index` and move right.
+    mutating func index(index: usize):
+        if self.x < self.width and self.row < self.height:
+            let at = ((self.height - 1 - self.row) * self.width + self.x) * 4
+            memory.copy(self.canvas[at..], self.table[index * 4..], 4)
+        self.x += 1
+
+    ## Set the next pixel to the blue, green, red bytes at `at` of `data` and move right.
+    mutating func color(data: const u8[], at: usize):
+        if self.x < self.width and self.row < self.height:
+            let to = ((self.height - 1 - self.row) * self.width + self.x) * 4
+            self.canvas[to] = data[at + 2]
+            self.canvas[to + 1] = data[at + 1]
+            self.canvas[to + 2] = data[at]
+            self.canvas[to + 3] = 255
+        self.x += 1
+
+## Decode the run-length data of `data` into `canvas`.
+func decode_rle(data: const u8[], header: const Header*, canvas: u8[]):
+    var runs = Runs(canvas = canvas, width = header.width, height = header.height)
+    palette_table(data, header, runs.table)
+    let compression = header.compression
+    var at = header.pixels
+    while at + 1 < data.length and runs.row < runs.height:
+        let count = (usize)data[at]
+        let value = (usize)data[at + 1]
+        if count > 0:
+            if compression == Compression.rle24:
+                if at + 4 > data.length:
+                    return
+                var left = count
+                while left > 0:
+                    runs.color(data, at + 1)
+                    left -= 1
+                at += 4
+            else:
+                for k in 0..<count:
+                    if compression == Compression.rle4:
+                        runs.index((value >> 4) if k % 2 == 0 else (value & 15))
+                    else:
+                        runs.index(value)
+                at += 2
+            continue
+        at += 2
+        if value == 0:
+            runs.x = 0
+            runs.row += 1
+        elif value == 1:
+            return
+        elif value == 2:
+            if at + 2 > data.length:
+                return
+            runs.x += (usize)data[at]
+            runs.row += (usize)data[at + 1]
+            at += 2
+        else:
+            let size = (value * 3) if compression == Compression.rle24 else ((value + 1) // 2 if compression == Compression.rle4 else value)
+            if at + size > data.length:
+                return
+            for k in 0..<value:
+                if compression == Compression.rle24:
+                    runs.color(data, at + k * 3)
+                elif compression == Compression.rle4:
+                    let byte = (usize)data[at + k // 2]
+                    runs.index((byte >> 4) if k % 2 == 0 else (byte & 15))
+                else:
+                    runs.index((usize)data[at + k])
+            at += size + size % 2

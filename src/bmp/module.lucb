@@ -1,0 +1,148 @@
+#==============================================================================================
+#
+#   bmp - BMP decoding: Windows and OS/2 bitmaps, and the DIBs inside icons
+#
+#   DESCRIPTION:
+#       Reads BMP files and bare DIBs (a bitmap's info header, palette and pixels, as
+#       ICO and CUR entries and clipboards hold them) into 8-bit straight RGBA: the
+#       OS/2 1.x header (12 bytes), OS/2 2.x headers (16 to 64), and the Windows
+#       BITMAPINFOHEADER (40), its 52- and 56-byte extensions, V4 (108) and V5 (124);
+#       1, 2, 4 and 8 bits through a palette, 16 and 32 through bitfields, 24 as BGR;
+#       RLE8, RLE4 and OS/2's RLE24; bottom-up and top-down rows. A BMP that holds a
+#       JPEG or PNG (BI_JPEG, BI_PNG) hands its payload back through `embedded`.
+#
+#       Where formats are loose, this decoder does what Chrome does: the alpha channel
+#       is read only where a V4+ header's alpha mask, BI_ALPHABITFIELDS or an icon asks
+#       for it, and an image whose alpha is zero throughout is opaque; channels under 8
+#       bits scale to the full range (5-bit 31 is 255), wider ones keep their top 8 bits;
+#       pixels an RLE stream skips are transparent; an index past the palette is black.
+#       It is more lenient where a file is cut short: the rows that are there decode,
+#       the rest stay transparent.
+#
+#       Fragments, in ORDER:
+#
+#       module.lucb    the public API: errors, Info, Options, info, decode_rgba8
+#       header.lucb    the file header, the info header variants, masks and palette
+#       pixels.lucb    uncompressed rows: palettes, bitfields and BGR
+#       rle.lucb       RLE8, RLE4 and RLE24
+#       mask.lucb      alpha after decoding: opaque when unused, an icon's AND mask
+#
+#==============================================================================================
+
+import memory
+
+# mark: Errors ================================================================================
+
+## The bytes are not a BMP, or its headers are damaged or contradict one another.
+pub let corrupt: ErrorCode = ErrorCode.package(1)
+
+## A valid bitmap this decoder does not read: OS/2 Huffman 1D, 64-bit pixels, a bitmap
+## array, an embedded JPEG or PNG (see `embedded`), an unknown compression.
+pub let unsupported: ErrorCode = ErrorCode.package(2)
+
+## A limit in `Options` was reached: the picture has more pixels than `max_pixels`.
+pub let limit: ErrorCode = ErrorCode.package(3)
+
+## The caller's request cannot be met: an output buffer too small.
+pub let invalid: ErrorCode = ErrorCode.package(4)
+
+# mark: Information ===========================================================================
+
+## How the pixels are stored.
+pub enum Compression:
+    rgb
+    rle8
+    rle4
+    ## Bitfields: masks give each channel's bits in a 16- or 32-bit pixel.
+    bitfields
+    ## Bitfields with an alpha mask (BI_ALPHABITFIELDS, from Windows CE).
+    alpha_bitfields
+    ## The pixel data is a JPEG or a PNG.
+    jpeg
+    png
+    ## OS/2 2.x's 24-bit run lengths.
+    rle24
+    ## OS/2 2.x's Huffman 1D (CCITT G3) monochrome coding.
+    huffman
+
+## A bitmap's size and pixel format, from its headers.
+pub struct Info:
+    pub var width: usize
+    pub var height: usize
+    ## Bits a pixel: 1, 2, 4, 8, 16, 24 or 32 (0 for an embedded JPEG or PNG).
+    pub var bits: usize
+    pub var compression: Compression = Compression.rgb
+    ## The info header's size: 12 for OS/2 1.x, 40 for BITMAPINFOHEADER, 108 for V4,
+    ## 124 for V5, 16 to 64 for OS/2 2.x.
+    pub var header_size: usize
+    ## Rows run top to bottom in the file (a negative height).
+    pub var top_down: bool
+    ## Palette entries the decoder uses.
+    pub var colors: usize
+    ## Whether decoded pixels can be transparent: an alpha channel is read, an RLE stream
+    ## may skip pixels, or an icon's AND mask applies.
+    pub var alpha: bool
+
+## How a decode runs.
+pub struct Options:
+    ## The most pixels a picture may have.
+    pub var max_pixels: usize = 268435456
+    ## The DIB is an ICO or CUR entry's: its header's height counts the colour rows and
+    ## the 1-bit AND mask rows after them, a 32-bit image's fourth byte is alpha, and,
+    ## where the image has no alpha, a set mask bit makes its pixel transparent.
+    pub var icon: bool = false
+
+# mark: Decoding ==============================================================================
+
+## The size and format of the BMP file in `data`.
+pub func info(data: const u8[]) -> Info!:
+    let header = try Header.parse(data, true, false)
+    return header.info()
+
+## The size and format of the bare DIB in `data`, an info header first.
+pub func info_dib(data: const u8[], options: Options = Options()) -> Info!:
+    let header = try Header.parse(data, false, options.icon)
+    return header.info()
+
+## Decode the BMP file in `data` into `out`, `width * height * 4` bytes of straight RGBA,
+## top row first.
+pub func decode_rgba8(data: const u8[], out: u8[], options: Options = Options()) -> !:
+    let header = try Header.parse(data, true, false)
+    try decode_into(data, &header, out, options)
+
+## Decode the bare DIB in `data`, an info header first, into `out` as `decode_rgba8`
+## does. With `options.icon`, the AND mask after the pixels applies.
+pub func decode_dib_rgba8(data: const u8[], out: u8[], options: Options = Options()) -> !:
+    let header = try Header.parse(data, false, options.icon)
+    try decode_into(data, &header, out, options)
+
+## The JPEG or PNG a BI_JPEG or BI_PNG bitmap holds, as a view of `data`; none for any
+## other bitmap.
+pub func embedded(data: const u8[]) -> const u8[]?:
+    let header = Header.parse(data, true, false) catch failure:
+        discard(failure)
+        return none
+    if header.compression == Compression.jpeg or header.compression == Compression.png:
+        return header.payload(data)
+    return none
+
+## Decode the pixels `header` describes from `data` into `out`.
+func decode_into(data: const u8[], header: const Header*, out: u8[], options: Options) -> !:
+    if header.compression == Compression.jpeg or header.compression == Compression.png:
+        error(unsupported, "BMP holds a JPEG or PNG: decode the bytes `embedded` answers")
+    if header.compression == Compression.huffman:
+        error(unsupported, "BMP uses OS/2 Huffman 1D coding")
+    if header.height > options.max_pixels // header.width:
+        error(limit, "BMP has more pixels than allowed")
+    let size = header.width * header.height * 4
+    if out.length < size:
+        error(invalid, "BMP output buffer is smaller than the picture")
+    let canvas = out[..<size]
+    memory.set(canvas, 0)
+    var rows: usize = 0
+    if header.compression == Compression.rle8 or header.compression == Compression.rle4 or header.compression == Compression.rle24:
+        decode_rle(data, header, canvas)
+        rows = header.height
+    else:
+        rows = decode_rows(data, header, canvas)
+    finish_alpha(data, header, canvas, rows)
