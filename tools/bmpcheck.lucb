@@ -1,0 +1,105 @@
+#==============================================================================================
+#
+#   tools/bmpcheck - Decode a list of BMPs, writing their pixels
+#
+#   DESCRIPTION:
+#       The Luce half of the conformance runner (conformance.py) and the fuzzer
+#       (fuzz.py). Usage: `bmpcheck LIST OUTDIR`. Each line of LIST is `FLAGS PATH`, FLAGS
+#       a word of letters (or `-` for none): `q` decodes without writing anything (the
+#       fuzzer's runs), `s` lowers the pixel limit to 4 megapixels, `d` reads the file as
+#       a bare DIB and `i` as an icon's DIB. For the Nth line it prints
+#       `N ok WIDTH HEIGHT BITS COMPRESSION HEADER` and writes the RGBA pixels to
+#       OUTDIR/N.rgba, or prints `N embedded BYTES` for a bitmap holding a JPEG or PNG and
+#       writes those bytes to OUTDIR/N.payload, or prints `N error CODE MESSAGE`.
+#
+#==============================================================================================
+
+import io
+import memory
+import bmp
+import disk
+
+extern func fflush(file: void*?) -> i32
+
+## A file of the list cannot be read.
+let missing: ErrorCode = ErrorCode.package(100)
+
+## The name of a failure's code.
+func code_name(code: ErrorCode) -> str:
+    if code == bmp.corrupt:
+        return "corrupt"
+    if code == bmp.unsupported:
+        return "unsupported"
+    if code == bmp.limit:
+        return "limit"
+    if code == bmp.invalid:
+        return "invalid"
+    if code == missing:
+        return "missing"
+    return "other"
+
+## The name of a compression.
+func compression_name(compression: bmp.Compression) -> str:
+    return match compression:
+        .rgb => "rgb"
+        .rle8 => "rle8"
+        .rle4 => "rle4"
+        .bitfields => "bitfields"
+        .alpha_bitfields => "alpha_bitfields"
+        .jpeg => "jpeg"
+        .png => "png"
+        .rle24 => "rle24"
+        .huffman => "huffman"
+
+## Decode the file of one job and report it.
+func run_job(number: usize, job: disk.Job, directory: str) -> !:
+    let data = disk.read_file(job.path) else error(missing, "cannot read the file")
+    defer free(data) in memory.heap
+    var options = bmp.Options(icon = disk.has(job.flags, 'i'))
+    if disk.has(job.flags, 's'):
+        options.max_pixels = 4194304
+    let bare = disk.has(job.flags, 'd') or options.icon
+    if not bare:
+        if let payload = bmp.embedded(data):
+            print(f"{number} embedded {payload.length}")
+            if not disk.has(job.flags, 'q'):
+                try write_output(directory, f"/{number}.payload", payload)
+            return
+    let found = try (bmp.info_dib(data, options) if bare else bmp.info(data))
+    if found.height > options.max_pixels // found.width:
+        error(bmp.limit, "BMP has more pixels than allowed")
+    let pixels = try new u8[found.width * found.height * 4] in memory.heap
+    defer free(pixels) in memory.heap
+    if bare:
+        try bmp.decode_dib_rgba8(data, pixels, options)
+    else:
+        try bmp.decode_rgba8(data, pixels, options)
+    let out = io.stdout()
+    discard(try out.write(f"{number} ok {found.width} {found.height} {found.bits} {compression_name(found.compression)} {found.header_size}\n"))
+    if not disk.has(job.flags, 'q'):
+        try write_output(directory, f"/{number}.rgba", pixels)
+
+## Write `data` to the file `name` (formatted) in `directory`.
+func write_output(directory: str, name: fmt, data: const u8[]) -> !:
+    var digits: u8[64]
+    let file = try format(digits, name)
+    var target = disk.Buffer()
+    defer target.release()
+    try target.add_all(directory.bytes)
+    try target.add_all(file.bytes)
+    try disk.write_file((str)target.view(), data)
+
+pub func main(arguments: str[]) -> i32!:
+    if arguments.length < 3:
+        print("usage: bmpcheck LIST OUTDIR")
+        return 2
+    let list = disk.read_file(arguments[1]) else error(memory.exhausted, "cannot read the list")
+    defer free(list) in memory.heap
+    var jobs = disk.Jobs.over(list)
+    var number: usize = 0
+    while let job = jobs.next():
+        run_job(number, job, arguments[2]) catch failure:
+            print(f"{number} error {code_name(failure.code)} {failure.message}")
+        discard(fflush(none))
+        number += 1
+    return 0
