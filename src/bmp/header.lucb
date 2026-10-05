@@ -61,7 +61,7 @@ struct Header:
 
     ## The headers of the bitmap in `data`: a BMP file when `file`, else a bare DIB;
     ## `icon` for an ICO or CUR entry's DIB.
-    func parse(data: const u8[], file: bool, icon: bool) -> Header!:
+    static func parse(data: const u8[], file: bool, icon: bool) -> Header!:
         var at: usize = 0
         var offset: usize = 0
         if file:

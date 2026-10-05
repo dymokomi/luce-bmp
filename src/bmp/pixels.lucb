@@ -22,7 +22,7 @@ struct Channel:
     var bits: u32
 
     ## The channel `mask` selects.
-    func of(mask: u32) -> Channel:
+    static func of(mask: u32) -> Channel:
         if mask == 0:
             return Channel(mask = 0, shift = 0, bits = 0)
         let shift = (u32)trailing_zeros(mask)

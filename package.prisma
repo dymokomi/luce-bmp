@@ -1,7 +1,7 @@
 #prisma 4.0
 def package "luce-bmp" {
     str owner = "dymokomi"
-    str version = "0.2.0"
+    str version = "0.3.0"
     str kind = "package"
     str language = "luce-base"
     str description = "A BMP decoder for Luce/Base: Windows and OS/2 headers, 1- to 32-bit pixels, RLE, bitfields and alpha, and the DIBs inside icons."
