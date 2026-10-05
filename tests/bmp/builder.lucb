@@ -25,24 +25,24 @@ struct Bitmap:
     func data() -> const u8[]:
         return self.bytes[..<self.used]
 
-    mutating func add(byte: u8):
+    func add(byte: u8):
         self.bytes[self.used] = byte
         self.used += 1
 
-    mutating func add_all(data: const u8[]):
+    func add_all(data: const u8[]):
         for byte in data:
             self.add(byte)
 
-    mutating func word(value: usize):
+    func word(value: usize):
         self.add((u8)(value & 0xFF))
         self.add((u8)((value >> 8) & 0xFF))
 
-    mutating func long(value: u32):
+    func long(value: u32):
         self.word((usize)(value & 0xFFFF))
         self.word((usize)(value >> 16))
 
     ## The 14-byte file header; its pixel offset is filled in by `start_pixels`.
-    mutating func file_header():
+    func file_header():
         self.file = true
         self.add_all(b"BM")
         self.long(0)
@@ -51,7 +51,7 @@ struct Bitmap:
 
     ## An info header of `size` bytes: 12 for OS/2 1.x, else the BITMAPINFOHEADER fields,
     ## then `masks` from byte 40 on, zeros after.
-    mutating func info(size: usize, width: i32, height: i32, bits: usize, compression: u32 = 0, colors: u32 = 0, masks: u32[4] = [0, 0, 0, 0]):
+    func info(size: usize, width: i32, height: i32, bits: usize, compression: u32 = 0, colors: u32 = 0, masks: u32[4] = [0, 0, 0, 0]):
         let start = self.used
         self.long((u32)size)
         if size == 12:
@@ -78,7 +78,7 @@ struct Bitmap:
             self.add(0)
 
     ## `masks` after a 40-byte header: three, or four for BI_ALPHABITFIELDS.
-    mutating func masks(r: u32, g: u32, b: u32, a: u32? = none):
+    func masks(r: u32, g: u32, b: u32, a: u32? = none):
         self.long(r)
         self.long(g)
         self.long(b)
@@ -86,7 +86,7 @@ struct Bitmap:
             self.long(value)
 
     ## A palette of `colors` (RGB triples), 4 bytes an entry, or 3 for OS/2 1.x.
-    mutating func palette(colors: const u8[], entry: usize = 4):
+    func palette(colors: const u8[], entry: usize = 4):
         var at: usize = 0
         while at + 2 < colors.length:
             self.add(colors[at + 2])
@@ -97,7 +97,7 @@ struct Bitmap:
             at += 3
 
     ## The pixels start here; the file header says they start at `offset` when given.
-    mutating func start_pixels(offset: usize? = none):
+    func start_pixels(offset: usize? = none):
         self.pixel_start = self.used
         if self.file:
             let at = offset else self.used
@@ -105,7 +105,7 @@ struct Bitmap:
             self.bytes[11] = (u8)((at >> 8) & 0xFF)
 
     ## A row of pixel bytes, padded to four.
-    mutating func row(data: const u8[]):
+    func row(data: const u8[]):
         self.add_all(data)
         while (self.used - self.pixel_start) % 4 != 0:
             self.add(0)

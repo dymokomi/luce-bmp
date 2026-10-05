@@ -9,7 +9,7 @@ bitmaps through it.
 from luce_bmp import bmp
 
 let found = try bmp.info(data)                    # size, depth, compression, header
-let pixels = try alloc u8[found.width * found.height * 4]
+let pixels = try new u8[found.width * found.height * 4] ---
 try bmp.decode_rgba8(data, pixels)                # straight RGBA, top row first
 
 if let payload = bmp.embedded(data):              # a BI_PNG or BI_JPEG bitmap

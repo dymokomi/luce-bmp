@@ -26,14 +26,14 @@ struct Runs:
     var row: usize
 
     ## Set the next pixel to palette entry `index` and move right.
-    mutating func index(index: usize):
+    func index(index: usize):
         if self.x < self.width and self.row < self.height:
             let at = ((self.height - 1 - self.row) * self.width + self.x) * 4
             memory.copy(self.canvas[at..], self.table[index * 4..], 4)
         self.x += 1
 
     ## Set the next pixel to the blue, green, red bytes at `at` of `data` and move right.
-    mutating func color(data: const u8[], at: usize):
+    func color(data: const u8[], at: usize):
         if self.x < self.width and self.row < self.height:
             let to = ((self.height - 1 - self.row) * self.width + self.x) * 4
             self.canvas[to] = data[at + 2]

@@ -61,7 +61,7 @@ struct Header:
 
     ## The headers of the bitmap in `data`: a BMP file when `file`, else a bare DIB;
     ## `icon` for an ICO or CUR entry's DIB.
-    static func parse(data: const u8[], file: bool, icon: bool) -> Header!:
+    func parse(data: const u8[], file: bool, icon: bool) -> Header!:
         var at: usize = 0
         var offset: usize = 0
         if file:
@@ -132,7 +132,7 @@ struct Header:
         return header
 
     ## Read the compression `value` (OS/2 2.x numbers 3 and 4 differently).
-    mutating func compress(value: u32, os2: bool) -> !:
+    func compress(value: u32, os2: bool) -> !:
         self.compression = match value:
             0 => Compression.rgb
             1 => Compression.rle8
@@ -146,7 +146,7 @@ struct Header:
             error(unsupported, "OS/2 bitmap uses an unknown compression")
 
     ## Check the bit depth against the header and the compression, as Chrome does.
-    mutating func check_depth(os2: bool) -> !:
+    func check_depth(os2: bool) -> !:
         let bits = self.bits
         if bits == 64:
             error(unsupported, "BMP has 64-bit pixels")
@@ -183,7 +183,7 @@ struct Header:
     ## The masks of a bitmap without bitfields: 5-5-5 for 16 bits, 8-8-8 for 32. The
     ## alpha mask a 56-byte or larger header gives stays; a 32-bit icon without one has
     ## its fourth byte as alpha.
-    mutating func default_masks(size: usize):
+    func default_masks(size: usize):
         if self.compression == Compression.bitfields or self.compression == Compression.alpha_bitfields:
             return
         if self.depth == 16:
@@ -199,7 +199,7 @@ struct Header:
                 self.masks[3] = 0xFF000000 if self.icon else 0
 
     ## Trim the masks to the pixel's bits; fail on masks that overlap or have gaps.
-    mutating func check_masks() -> !:
+    func check_masks() -> !:
         if (self.depth != 16 and self.depth != 32) or self.compression == Compression.jpeg or self.compression == Compression.png:
             var none_set: u32[4]
             self.masks = none_set
@@ -222,7 +222,7 @@ struct Header:
     ## colour has 3-byte entries (some OS/2 2.x writers); an offset of 0, one inside the
     ## headers, or one that leaves a paletted bitmap no palette at all is taken to mean
     ## right after the palette.
-    mutating func place_palette(data: const u8[], start: usize, offset: usize, clr_used: usize, file: bool):
+    func place_palette(data: const u8[], start: usize, offset: usize, clr_used: usize, file: bool):
         self.palette = start
         var declared: usize = 0
         if self.depth > 0 and self.depth <= 8:
